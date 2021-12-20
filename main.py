@@ -9,10 +9,12 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 from multiprocessing import Process
 
 # InfluxDB Settings
+NAMESPACE = os.getenv('NAMESPACE', 'None')
 DB_URL = os.getenv('INFLUX_DB_URL', 'http://localhost')
 DB_TOKEN = os.getenv('INFLUX_DB_TOKEN', 'my-token')
 DB_ORG = os.getenv('INFLUX_DB_ORG', 'my-org')
 DB_BUCKET = os.getenv('INFLUX_DB_BUCKET', 'my-bucket')
+DB_TAGS = os.getenv('INFLUX_DB_TAGS', None)
 PING_TARGETS = os.getenv('PING_TARGETS', '1.1.1.1, 8.8.8.8')
 
 # Speedtest Settings
@@ -29,11 +31,55 @@ with InfluxDBClient(url=DB_URL, token=DB_TOKEN, org=DB_ORG) as client:
     write_api = client.write_api(write_options=SYNCHRONOUS)
     pass
 
+
+def init_db():
+    pass
+
 def pkt_loss(data):
     if 'packetLoss' in data.keys():
         return int(data['packetLoss'])
     else:
         return 0
+        
+
+def tag_selection(data):
+    tags = DB_TAGS
+    options = {}
+
+    # tag_switch takes in _data and attaches CLIoutput to more readable ids
+    tag_switch = {
+        'namespace': NAMESPACE,
+        'isp': data['isp'],
+        'interface': data['interface']['name'],
+        'internal_ip': data['interface']['internalIp'],
+        'interface_mac': data['interface']['macAddr'],
+        'vpn_enabled': (False if data['interface']['isVpn'] == 'false' else True),
+        'external_ip': data['interface']['externalIp'],
+        'server_id': data['server']['id'],
+        'server_name': data['server']['name'],
+        'server_location': data['server']['location'],
+        'server_country': data['server']['country'],
+        'server_host': data['server']['host'],
+        'server_port': data['server']['port'],
+        'server_ip': data['server']['ip'],
+        'speedtest_id': data['result']['id'],
+        'speedtest_url': data['result']['url']
+    }
+
+    if tags is None:
+        tags = 'namespace'
+    elif '*' in tags:
+        return tag_switch
+    else:
+        tags = 'namespace, ' + tags
+
+    tags = tags.split(',')
+    for tag in tags:
+        # split the tag string, strip and add selected tags to {options} with corresponding tag_switch data
+        tag = tag.strip()
+        options[tag] = tag_switch[tag]
+
+    return options
 
 
 def format_for_influx(data):
@@ -91,29 +137,12 @@ def format_for_influx(data):
                 'bytes_up': data['upload']['bytes'],
                 'elapsed_up': data['upload']['elapsed']
             }
-        },
-        {
-            'measurement': 'meta',
-            'time': data['timestamp'],
-            'fields': {
-                'isp': data['isp'],
-                'interface': data['interface']['name'],
-                'internal_ip': data['interface']['internalIp'],
-                'interface_mac': data['interface']['macAddr'],
-                'vpn_enabled': (False if data['interface']['isVpn'] == 'false' else True),
-                'external_ip': data['interface']['externalIp'],
-                'server_id': data['server']['id'],
-                'server_name': data['server']['name'],
-                'server_location': data['server']['location'],
-                'server_country': data['server']['country'],
-                'server_host': data['server']['host'],
-                'server_port': data['server']['port'],
-                'server_ip': data['server']['ip'],
-                'speedtest_id': data['result']['id'],
-                'speedtest_url': data['result']['url']
-            }
         }
     ]
+    tags = tag_selection(data)
+    if tags is not None:
+        for measurement in influx_data:
+            measurement['tags'] = tags
 
     return influx_data
 
@@ -155,6 +184,7 @@ def pingtest():
                 'measurement': 'pings',
                 'time': timestamp,
                 'tags': {
+                    'namespace': NAMESPACE,
                     'target' : target
                 },
                 'fields': {
@@ -172,6 +202,8 @@ def pingtest():
 def main():
     pPing = Process(target=pingtest)
     pSpeed = Process(target=speedtest)
+
+    init_db()  # Setup the database if it does not already exist.
 
     loopcount = 0
     while (1):  # Run a Speedtest and send the results to influxDB indefinitely.

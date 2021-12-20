@@ -16,11 +16,10 @@ The InfluxDB connection settings are controlled by environment variables.
 
 The variables available are:
 - NAMESPACE = default - None
-- INFLUX_DB_ADDRESS = default - influxdb
-- INFLUX_DB_PORT = default - 8086
-- INFLUX_DB_USER = default - {blank}
-- INFLUX_DB_PASSWORD = default - {blank}
-- INFLUX_DB_DATABASE = default - speedtests
+- INFLUX_DB_URL = default - http://localhost:8086
+- INFLUX_DB_TOKEN = default - my-token
+- INFLUX_DB_ORG = default - my-org
+- INFLUX_DB_BUCKET = default - my-bucket
 - INFLUX_DB_TAGS = default - None * See below for options, '*' widcard for all *
 - SPEEDTEST_INTERVAL = default - 5 (minutes)
 - SPEEDTEST_SERVER_ID = default - {blank} * id from https://c.speedtest.net/speedtest-servers-static.php *
