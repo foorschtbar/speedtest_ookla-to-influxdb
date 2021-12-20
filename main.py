@@ -4,17 +4,15 @@ import json
 import datetime
 import subprocess
 from pythonping import ping
-from influxdb import InfluxDBClient
+from influxdb_client import InfluxDBClient
+from influxdb_client.client.write_api import SYNCHRONOUS
 from multiprocessing import Process
 
 # InfluxDB Settings
-NAMESPACE = os.getenv('NAMESPACE', 'None')
-DB_ADDRESS = os.getenv('INFLUX_DB_ADDRESS', 'influxdb')
-DB_PORT = int(os.getenv('INFLUX_DB_PORT', '8086'))
-DB_USER = os.getenv('INFLUX_DB_USER', '')
-DB_PASSWORD = os.getenv('INFLUX_DB_PASSWORD', '')
-DB_DATABASE = os.getenv('INFLUX_DB_DATABASE', 'speedtests')
-DB_TAGS = os.getenv('INFLUX_DB_TAGS', None)
+DB_URL = os.getenv('INFLUX_DB_URL', 'http://localhost')
+DB_TOKEN = os.getenv('INFLUX_DB_TOKEN', 'my-token')
+DB_ORG = os.getenv('INFLUX_DB_ORG', 'my-org')
+DB_BUCKET = os.getenv('INFLUX_DB_BUCKET', 'my-bucket')
 PING_TARGETS = os.getenv('PING_TARGETS', '1.1.1.1, 8.8.8.8')
 
 # Speedtest Settings
@@ -27,66 +25,15 @@ SERVER_ID = os.getenv('SPEEDTEST_SERVER_ID', '')
 # Time between ping tests (in seconds).
 PING_INTERVAL = int(os.getenv('PING_INTERVAL', '5'))
 
-influxdb_client = InfluxDBClient(
-    DB_ADDRESS, DB_PORT, DB_USER, DB_PASSWORD, None)
-
-
-def init_db():
-    databases = influxdb_client.get_list_database()
-
-    if len(list(filter(lambda x: x['name'] == DB_DATABASE, databases))) == 0:
-        influxdb_client.create_database(
-            DB_DATABASE)  # Create if does not exist.
-    else:
-        # Switch to if does exist.
-        influxdb_client.switch_database(DB_DATABASE)
-
+with InfluxDBClient(url=DB_URL, token=DB_TOKEN, org=DB_ORG) as client:
+    write_api = client.write_api(write_options=SYNCHRONOUS)
+    pass
 
 def pkt_loss(data):
     if 'packetLoss' in data.keys():
         return int(data['packetLoss'])
     else:
         return 0
-
-
-def tag_selection(data):
-    tags = DB_TAGS
-    options = {}
-
-    # tag_switch takes in _data and attaches CLIoutput to more readable ids
-    tag_switch = {
-        'namespace': NAMESPACE,
-        'isp': data['isp'],
-        'interface': data['interface']['name'],
-        'internal_ip': data['interface']['internalIp'],
-        'interface_mac': data['interface']['macAddr'],
-        'vpn_enabled': (False if data['interface']['isVpn'] == 'false' else True),
-        'external_ip': data['interface']['externalIp'],
-        'server_id': data['server']['id'],
-        'server_name': data['server']['name'],
-        'server_location': data['server']['location'],
-        'server_country': data['server']['country'],
-        'server_host': data['server']['host'],
-        'server_port': data['server']['port'],
-        'server_ip': data['server']['ip'],
-        'speedtest_id': data['result']['id'],
-        'speedtest_url': data['result']['url']
-    }
-
-    if tags is None:
-        tags = 'namespace'
-    elif '*' in tags:
-        return tag_switch
-    else:
-        tags = 'namespace, ' + tags
-
-    tags = tags.split(',')
-    for tag in tags:
-        # split the tag string, strip and add selected tags to {options} with corresponding tag_switch data
-        tag = tag.strip()
-        options[tag] = tag_switch[tag]
-
-    return options
 
 
 def format_for_influx(data):
@@ -144,12 +91,29 @@ def format_for_influx(data):
                 'bytes_up': data['upload']['bytes'],
                 'elapsed_up': data['upload']['elapsed']
             }
+        },
+        {
+            'measurement': 'meta',
+            'time': data['timestamp'],
+            'fields': {
+                'isp': data['isp'],
+                'interface': data['interface']['name'],
+                'internal_ip': data['interface']['internalIp'],
+                'interface_mac': data['interface']['macAddr'],
+                'vpn_enabled': (False if data['interface']['isVpn'] == 'false' else True),
+                'external_ip': data['interface']['externalIp'],
+                'server_id': data['server']['id'],
+                'server_name': data['server']['name'],
+                'server_location': data['server']['location'],
+                'server_country': data['server']['country'],
+                'server_host': data['server']['host'],
+                'server_port': data['server']['port'],
+                'server_ip': data['server']['ip'],
+                'speedtest_id': data['result']['id'],
+                'speedtest_url': data['result']['url']
+            }
         }
     ]
-    tags = tag_selection(data)
-    if tags is not None:
-        for measurement in influx_data:
-            measurement['tags'] = tags
 
     return influx_data
 
@@ -169,8 +133,11 @@ def speedtest():
         data_json = json.loads(speedtest.stdout)
         print("time: " + str(data_json['timestamp']) + " - ping: " + str(data_json['ping']['latency']) + " ms - download: " + str(data_json['download']['bandwidth']/125000) + " Mb/s - upload: " + str(data_json['upload']['bandwidth'] / 125000) + " Mb/s - isp: " + data_json['isp'] + " - ext. IP: " + data_json['interface']['externalIp'] + " - server id: " + str(data_json['server']['id']) + " (" + data_json['server']['name'] + " @ " + data_json['server']['location'] + ")")
         data = format_for_influx(data_json)
-        if influxdb_client.write_points(data) == True:
-            print("Data written to DB successfully")
+        try:
+            write_api.write(bucket=DB_BUCKET, record=data)
+            print("Speedtest data written to DB successfully")
+        except InfluxDBError as e:
+            print("Speedtest data write failed.")
     else:  # Speedtest failed.
         print("Speedtest Failed :")
         print(speedtest.stderr)
@@ -188,7 +155,6 @@ def pingtest():
                 'measurement': 'pings',
                 'time': timestamp,
                 'tags': {
-                    'namespace': NAMESPACE,
                     'target' : target
                 },
                 'fields': {
@@ -197,16 +163,15 @@ def pingtest():
                 }
             }
         ]
-        if influxdb_client.write_points(data) == True:
+        try:
+            write_api.write(bucket=DB_BUCKET, record=data)
             print("Ping data written to DB successfully")
-        else:  # Speedtest failed.
-            print("Ping Failed.")
+        except InfluxDBError as e:
+            print("Ping data write failed.")
 
 def main():
     pPing = Process(target=pingtest)
     pSpeed = Process(target=speedtest)
-
-    init_db()  # Setup the database if it does not already exist.
 
     loopcount = 0
     while (1):  # Run a Speedtest and send the results to influxDB indefinitely.
